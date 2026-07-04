@@ -47,6 +47,12 @@ class WorkerRunner:
         self.bus = EventBus(settings.redis_url)
         self._draining = asyncio.Event()
         self._inflight: dict[asyncio.Task, Job] = {}
+        # Set whenever an in-flight job finishes, so the consume loop
+        # re-claims immediately instead of waiting out the poll interval.
+        # Without this, a saturated worker running fast jobs dispatches at
+        # most `concurrency` jobs per poll tick (found by benchmarking:
+        # ~2 jobs/s instead of hundreds).
+        self._slot_freed = asyncio.Event()
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -138,14 +144,35 @@ class WorkerRunner:
                     self._execute(job), name=f"job-{job.id}"
                 )
                 self._inflight[task] = job
-                task.add_done_callback(self._inflight.pop)
+                task.add_done_callback(self._on_task_done)
 
             if claimed:
                 continue  # queue may have more ready work; claim again now
 
-            # Idle or saturated: block on the Redis wake channel with the
-            # poll interval as timeout. Either an enqueue wakes us early or
-            # we poll — Redis being down only costs latency.
+            # Idle or saturated: wait for whichever comes first — a Redis
+            # wake (new work enqueued), a freed slot (an in-flight job
+            # finished), or the poll-interval timeout (Redis down or quiet;
+            # also picks up run_at/retry schedules coming due).
+            await self._wait_for_work()
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._inflight.pop(task, None)
+        self._slot_freed.set()
+
+    async def _wait_for_work(self) -> None:
+        self._slot_freed.clear()
+        if self._inflight:
+            wake = asyncio.create_task(
+                self.bus.wait_for_wake(self.settings.poll_interval_seconds)
+            )
+            freed = asyncio.create_task(self._slot_freed.wait())
+            _, pending = await asyncio.wait(
+                {wake, freed}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        else:
             await self.bus.wait_for_wake(self.settings.poll_interval_seconds)
 
     async def _execute(self, job: Job) -> None:
