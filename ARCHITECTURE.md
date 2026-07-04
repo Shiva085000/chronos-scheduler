@@ -286,6 +286,7 @@ schemas       → Pydantic DTOs; ORM objects never cross the HTTP boundary.
 | Postgres down | API 503s via `/readyz`; workers back off and retry claims | system resumes when PG returns; no state lost |
 | Deploy (SIGTERM) | drain → finish or release with refund | jobs rerun immediately, no budget burned |
 | Reaper host dies | any other worker's reaper loop wins the advisory lock next sweep | no dedicated scheduler to lose |
+| Worker stalls > 60s but survives (host sleep, paused container) | reaper marks it offline; its next successful heartbeat resurrects it (offline → online, stopped_at cleared) | fleet view self-heals from false death verdicts |
 
 ## Scaling path (deliberately not built)
 

@@ -23,10 +23,21 @@ class WorkerRepository:
         return list(result.scalars().all())
 
     async def heartbeat(self, worker_id: uuid.UUID) -> int:
-        result = await self.session.execute(
+        await self.session.execute(
             update(Worker)
             .where(Worker.id == worker_id)
             .values(last_heartbeat_at=func.now())
+            .execution_options(synchronize_session=False)
+        )
+        # Self-heal false death: if the reaper declared this worker offline
+        # during a transient stall (host sleep, paused container, >60s DB
+        # outage), the fact that we are heartbeating again proves it wrong.
+        # Without this, a live worker stays "offline" in the fleet view and
+        # stats forever. OFFLINE only — a DRAINING worker must stay draining.
+        result = await self.session.execute(
+            update(Worker)
+            .where(Worker.id == worker_id, Worker.status == WorkerStatus.OFFLINE)
+            .values(status=WorkerStatus.ONLINE, stopped_at=None)
             .execution_options(synchronize_session=False)
         )
         return result.rowcount or 0

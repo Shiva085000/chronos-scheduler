@@ -64,11 +64,16 @@ class ExecutionService:
         forward together, or neither does.
         """
         async with self.session_factory() as session:
-            await WorkerRepository(session).heartbeat(worker_id)
+            resurrected = await WorkerRepository(session).heartbeat(worker_id)
             extended = await JobRepository(session).extend_leases(
                 worker_id, lease_seconds
             )
             await session.commit()
+            if resurrected:
+                logger.warning(
+                    "worker.resurrected_after_false_death",
+                    worker_id=str(worker_id),
+                )
             return extended
 
     async def set_worker_status(
