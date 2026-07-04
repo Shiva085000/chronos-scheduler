@@ -1,0 +1,21 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# node
+node_modules/
+.next/
+out/
+
+# env
+.env
+.env.local
+
+# misc
+.DS_Store
+*.log
+
+# local interview notes — not part of the submission
+notes/
