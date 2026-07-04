@@ -13,7 +13,9 @@ Next.js operations dashboard.
 [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) is an eight-section report
 (architecture, reliability, concurrency, database, decisions, verification,
 scaling limits) and [docs/DIAGRAMS.md](docs/DIAGRAMS.md) holds ten Mermaid
-diagrams of the core protocols.
+diagrams of the core protocols. Everything combined, print-ready:
+[docs/Chronos-Report.pdf](docs/Chronos-Report.pdf) (design doc + measured
+benchmarks + rendered diagrams, 21pp).
 
 ## Quickstart
 
