@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Palette roles from the validated reference palette (dataviz skill).
+   Light and dark are separately selected steps, not automatic flips. */
+:root {
+  --background: #f9f9f7;
+  --surface: #fcfcfb;
+  --foreground: #0b0b0b;
+  --secondary-ink: #52514e;
+  --muted-ink: #898781;
+  --border-line: #e1e0d9;
+  --accent: #2a78d6;
+  --accent-foreground: #ffffff;
+
+  /* chart series & status roles */
+  --viz-succeeded: #1baf7a;
+  --viz-failed: #e34948;
+  --viz-running: #2a78d6;
+  --viz-pending: #eda100;
+  --viz-cancelled: #898781;
+  --viz-dead: #e34948;
+  --viz-grid: #e1e0d9;
+  --viz-axis: #898781;
+
+  /* status badge washes */
+  --wash-succeeded: rgba(27, 175, 122, 0.12);
+  --wash-failed: rgba(227, 73, 72, 0.12);
+  --wash-running: rgba(42, 120, 214, 0.12);
+  --wash-pending: rgba(237, 161, 0, 0.14);
+  --wash-cancelled: rgba(137, 135, 129, 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0d0d0d;
+    --surface: #1a1a19;
+    --foreground: #ffffff;
+    --secondary-ink: #c3c2b7;
+    --muted-ink: #898781;
+    --border-line: #2c2c2a;
+    --accent: #3987e5;
+    --accent-foreground: #ffffff;
+
+    --viz-succeeded: #199e70;
+    --viz-failed: #e66767;
+    --viz-running: #3987e5;
+    --viz-pending: #c98500;
+    --viz-cancelled: #898781;
+    --viz-dead: #e66767;
+    --viz-grid: #2c2c2a;
+    --viz-axis: #898781;
+
+    --wash-succeeded: rgba(25, 158, 112, 0.18);
+    --wash-failed: rgba(230, 103, 103, 0.18);
+    --wash-running: rgba(57, 135, 229, 0.18);
+    --wash-pending: rgba(201, 133, 0, 0.2);
+    --wash-cancelled: rgba(137, 135, 129, 0.2);
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
