@@ -19,3 +19,6 @@ out/
 
 # local interview notes — not part of the submission
 notes/
+
+# generated (rebuild with tools/build_report.py)
+docs/Chronos-Report.html
