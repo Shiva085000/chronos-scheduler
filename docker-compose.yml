@@ -1,0 +1,108 @@
+name: chronos
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chronos
+      POSTGRES_PASSWORD: chronos
+      POSTGRES_DB: chronos
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chronos -d chronos"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # not published to the host on purpose — only api/workers talk to it
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment: &backend_env
+      DATABASE_URL: postgresql+asyncpg://chronos:chronos@postgres:5432/chronos
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      ENVIRONMENT: development
+      DEBUG: "false"
+      CORS_ORIGINS: '["http://localhost:${WEB_PORT:-3000}", "http://localhost:3000"]'
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker.main"]
+    # A crashed worker must come back on its own; jobs it held are covered
+    # by lease expiry either way — restart restores *capacity*.
+    restart: unless-stopped
+    environment:
+      <<: *backend_env
+      WORKER_CONCURRENCY: 4
+      LEASE_SECONDS: 30
+      HEARTBEAT_SECONDS: 10
+    deploy:
+      replicas: 2
+    # Liveness = heartbeat recency: the heartbeat loop touches a file after
+    # each successful beat; stale file (> 2 × HEARTBEAT_SECONDS) = unhealthy,
+    # so a wedged-but-running worker is visible to the orchestrator.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,sys,time; p='/tmp/chronos-worker-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 20 else 1)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    # SIGTERM -> drain: finish in-flight jobs, release the rest. Must be
+    # longer than SHUTDOWN_GRACE_SECONDS so compose doesn't SIGKILL early.
+    stop_grace_period: 30s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  frontend:
+    restart: unless-stopped
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:${API_PORT:-8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
