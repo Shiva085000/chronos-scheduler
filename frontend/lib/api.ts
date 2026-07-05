@@ -2,12 +2,16 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const TOKEN_KEY = "chronos_token";
 
 export type JobStatus = "pending" | "running" | "succeeded" | "cancelled" | "dead";
+export type RetryStrategy = "fixed" | "linear" | "exponential";
 
 export interface Job {
   id: string;
   owner_id: string;
+  queue_id: string;
   queue: string;
   task_name: string;
+  batch_id: string | null;
+  workflow_id: string | null;
   payload: Record<string, unknown>;
   status: JobStatus;
   priority: number;
@@ -15,6 +19,7 @@ export interface Job {
   idempotency_key: string | null;
   max_attempts: number;
   attempt_count: number;
+  backoff_strategy: RetryStrategy;
   timeout_seconds: number;
   backoff_base_seconds: number;
   backoff_factor: number;
@@ -22,11 +27,18 @@ export interface Job {
   locked_by: string | null;
   lease_expires_at: string | null;
   last_error: string | null;
+  ai_summary: string | null;
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface JobDependency {
+  id: string;
+  job_id: string;
+  depends_on_job_id: string;
 }
 
 export interface Attempt {
@@ -81,8 +93,81 @@ export interface JobCreateInput {
   run_at?: string;
   max_attempts?: number;
   timeout_seconds?: number;
+  backoff_strategy?: RetryStrategy;
   backoff_base_seconds?: number;
   idempotency_key?: string;
+  depends_on?: string[];
+}
+
+export interface ProjectInfo {
+  id: string;
+  org_id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface QueueInfo {
+  id: string;
+  project_id: string;
+  name: string;
+  paused: boolean;
+  shard_key: number;
+  max_concurrency: number | null;
+  default_priority: number;
+  default_max_attempts: number;
+  default_backoff_strategy: RetryStrategy;
+  default_backoff_base_seconds: number;
+  default_backoff_factor: number;
+  default_backoff_max_seconds: number;
+  default_timeout_seconds: number;
+  created_at: string;
+  updated_at: string;
+  counts_by_status: Record<JobStatus, number>;
+}
+
+export interface QueueUpdateInput {
+  paused?: boolean;
+  shard_key?: number;
+  max_concurrency?: number | null;
+  default_priority?: number;
+  default_max_attempts?: number;
+  default_backoff_strategy?: RetryStrategy;
+  default_backoff_base_seconds?: number;
+  default_backoff_factor?: number;
+  default_backoff_max_seconds?: number;
+  default_timeout_seconds?: number;
+}
+
+export interface ScheduleInfo {
+  id: string;
+  owner_id: string;
+  queue_id: string;
+  queue: string;
+  task_name: string;
+  payload: Record<string, unknown>;
+  cron_expr: string;
+  paused: boolean;
+  priority: number;
+  max_attempts: number;
+  timeout_seconds: number;
+  backoff_strategy: RetryStrategy;
+  backoff_base_seconds: number;
+  backoff_factor: number;
+  backoff_max_seconds: number;
+  next_run_at: string;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleCreateInput {
+  task_name: string;
+  payload: Record<string, unknown>;
+  cron_expr: string;
+  queue?: string;
+  priority?: number;
+  max_attempts?: number;
+  timeout_seconds?: number;
 }
 
 export class ApiError extends Error {
@@ -134,6 +219,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
   if (!res.ok) throw new ApiError(res.status, await parseError(res));
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -168,6 +254,7 @@ export const jobsApi = {
   },
   get: (id: string) => api<Job>(`/api/v1/jobs/${id}`),
   attempts: (id: string) => api<Attempt[]>(`/api/v1/jobs/${id}/attempts`),
+  dependencies: (id: string) => api<JobDependency[]>(`/api/v1/jobs/${id}/dependencies`),
   create: (input: JobCreateInput) =>
     api<Job>("/api/v1/jobs", { method: "POST", body: JSON.stringify(input) }),
   cancel: (id: string) => api<Job>(`/api/v1/jobs/${id}/cancel`, { method: "POST" }),
@@ -184,6 +271,61 @@ export const workersApi = {
   list: () => api<WorkerInfo[]>("/api/v1/workers"),
 };
 
+export const projectsApi = {
+  list: () => api<ProjectInfo[]>("/api/v1/projects"),
+};
+
+export const queuesApi = {
+  list: () => api<QueueInfo[]>("/api/v1/queues"),
+  pause: (id: string) => api<QueueInfo>(`/api/v1/queues/${id}/pause`, { method: "POST" }),
+  resume: (id: string) =>
+    api<QueueInfo>(`/api/v1/queues/${id}/resume`, { method: "POST" }),
+  update: (id: string, input: QueueUpdateInput) =>
+    api<QueueInfo>(`/api/v1/queues/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+};
+
+export const schedulesApi = {
+  list: (limit = 50, offset = 0) =>
+    api<PageOf<ScheduleInfo>>(`/api/v1/schedules?limit=${limit}&offset=${offset}`),
+  create: (input: ScheduleCreateInput) =>
+    api<ScheduleInfo>("/api/v1/schedules", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  setPaused: (id: string, paused: boolean) =>
+    api<ScheduleInfo>(`/api/v1/schedules/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ paused }),
+    }),
+  remove: (id: string) =>
+    api<void>(`/api/v1/schedules/${id}`, { method: "DELETE" }),
+};
+
 export const statsApi = {
   overview: () => api<StatsOverview>("/api/v1/stats/overview"),
+};
+
+export type UserRole = "owner" | "admin" | "member" | "viewer";
+
+export interface UserInfo {
+  id: string;
+  email: string;
+  role: UserRole;
+  created_at: string;
+}
+
+export const authApi = {
+  me: () => api<UserInfo>("/api/v1/auth/me"),
+};
+
+export const usersApi = {
+  list: () => api<UserInfo[]>("/api/v1/users"),
+  updateRole: (id: string, role: UserRole) =>
+    api<UserInfo>(`/api/v1/users/${id}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
 };

@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, RotateCcw, XCircle } from "lucide-react";
+import { ArrowLeft, BrainCircuit, GitFork, RotateCcw, XCircle } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
-import { jobsApi } from "@/lib/api";
+import { jobsApi, type JobDependency } from "@/lib/api";
 import { duration, shortId, timeAgo } from "@/lib/format";
 import { usePolling } from "@/hooks/use-polling";
 
@@ -29,18 +29,19 @@ export default function JobDetailPage() {
 
   const { data, refresh } = usePolling(
     async () => {
-      const [job, attempts] = await Promise.all([
+      const [job, attempts, deps] = await Promise.all([
         jobsApi.get(jobId),
         jobsApi.attempts(jobId),
+        jobsApi.dependencies(jobId).catch(() => [] as JobDependency[]),
       ]);
-      return { job, attempts };
+      return { job, attempts, deps };
     },
     3000,
     [jobId],
   );
 
   if (!data) return <p className="text-sm text-secondary">Loading job…</p>;
-  const { job, attempts } = data;
+  const { job, attempts, deps } = data;
 
   const act = async (fn: () => Promise<unknown>) => {
     try {
@@ -140,6 +141,57 @@ export default function JobDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* AI Failure Summary */}
+      {job.ai_summary && (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-amber-600">
+              <BrainCircuit className="h-4 w-4" /> AI Failure Analysis
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm leading-relaxed">{job.ai_summary}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Workflow Dependencies */}
+      {(deps.length > 0 || job.workflow_id) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <GitFork className="h-4 w-4" /> Workflow Dependencies
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {job.workflow_id && (
+              <p className="mb-2 text-xs text-muted">
+                Workflow: <span className="font-mono">{shortId(job.workflow_id)}</span>
+              </p>
+            )}
+            {deps.length > 0 ? (
+              <ul className="space-y-1">
+                {deps.map((d) => (
+                  <li key={d.id} className="flex items-center gap-2 text-sm">
+                    <span className="text-muted">depends on</span>
+                    <Link
+                      href={`/jobs/${d.depends_on_job_id}`}
+                      className="font-mono text-xs text-accent hover:underline"
+                    >
+                      {shortId(d.depends_on_job_id)}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted">
+                Part of a workflow but has no upstream dependencies (root job).
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

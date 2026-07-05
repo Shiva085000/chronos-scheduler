@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { jobsApi } from "@/lib/api";
+import { jobsApi, RetryStrategy } from "@/lib/api";
 
 const TASKS = [
   { name: "demo.echo", payload: '{\n  "message": "hello"\n}' },
@@ -30,6 +30,7 @@ export function NewJobDialog({
   const [taskName, setTaskName] = useState(TASKS[0].name);
   const [payload, setPayload] = useState(TASKS[0].payload);
   const [priority, setPriority] = useState("0");
+  const [strategy, setStrategy] = useState<RetryStrategy>("exponential");
   const [maxAttempts, setMaxAttempts] = useState("3");
   const [timeoutSeconds, setTimeoutSeconds] = useState("300");
   const [delaySeconds, setDelaySeconds] = useState("");
@@ -52,6 +53,7 @@ export function NewJobDialog({
         task_name: taskName,
         payload: parsed,
         priority: Number(priority) || 0,
+        backoff_strategy: strategy,
         max_attempts: Number(maxAttempts) || 3,
         timeout_seconds: Number(timeoutSeconds) || 300,
         ...(delaySeconds
@@ -149,6 +151,19 @@ export function NewJobDialog({
               value={timeoutSeconds}
               onChange={(e) => setTimeoutSeconds(e.target.value)}
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="strategy">Retry strategy</Label>
+            <Select
+              id="strategy"
+              className="w-full"
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value as RetryStrategy)}
+            >
+              <option value="exponential">exponential</option>
+              <option value="linear">linear</option>
+              <option value="fixed">fixed</option>
+            </Select>
           </div>
         </div>
 

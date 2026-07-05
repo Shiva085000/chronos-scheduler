@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity } from "lucide-react";
+import { Activity, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,8 +13,8 @@ import { login, register } from "@/lib/api";
 export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("demo@example.com");
-  const [password, setPassword] = useState("demo12345");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -25,6 +25,19 @@ export default function LoginPage() {
     try {
       if (mode === "register") await register(email, password);
       await login(email, password);
+      router.push("/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const demoLogin = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      await login("demo@example.com", "demo12345");
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -48,6 +61,26 @@ export default function LoginPage() {
           </p>
         </CardHeader>
         <CardContent>
+          {/* --- Demo Login --- */}
+          <Button
+            type="button"
+            variant="outline"
+            className="mb-4 w-full gap-2 border-accent/30 bg-accent/5 text-accent hover:bg-accent/10 hover:text-accent"
+            disabled={busy}
+            onClick={demoLogin}
+          >
+            <Zap className="h-4 w-4" />
+            {busy ? "Signing in…" : "Demo Login"}
+          </Button>
+          <div className="relative mb-4">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-card px-2 text-muted">or use credentials</span>
+            </div>
+          </div>
+
           <form onSubmit={submit} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="email">Email</Label>
@@ -55,6 +88,7 @@ export default function LoginPage() {
                 id="email"
                 type="email"
                 required
+                placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
               />
@@ -87,9 +121,6 @@ export default function LoginPage() {
               ? "No account? Register instead"
               : "Have an account? Sign in"}
           </button>
-          <p className="mt-3 text-center text-xs text-muted">
-            Demo account (after seeding): demo@example.com / demo12345
-          </p>
         </CardContent>
       </Card>
     </main>
