@@ -45,13 +45,16 @@ async def test_concurrent_claimers_never_double_claim(session_factory):
     test_queue = f"claimtest-{uuid.uuid4()}"
 
     async with session_factory() as session:
-        user = User(
-            email=f"claimtest-{uuid.uuid4()}@example.com", password_hash="x"
-        )
-        session.add(user)
-        await session.flush()
+        from tests.factories import create_owner_with_queue
+
+        org, user, queue = await create_owner_with_queue(session, test_queue)
         jobs = [
-            Job(owner_id=user.id, task_name="demo.echo", queue=test_queue)
+            Job(
+                owner_id=user.id,
+                task_name="demo.echo",
+                queue=test_queue,
+                queue_id=queue.id,
+            )
             for _ in range(n_jobs)
         ]
         session.add_all(jobs)
@@ -87,11 +90,15 @@ async def test_concurrent_claimers_never_double_claim(session_factory):
         assert len(all_claimed) == len(set(all_claimed)), "a job was double-claimed"
         assert set(all_claimed) == set(job_ids), "some jobs were never claimed"
     finally:
-        # Leave no residue when running against a live database.
+        # Leave no residue when running against a live database. Deleting
+        # the org cascades users -> jobs and projects -> queues.
         from sqlalchemy import delete
 
+        from app.models import Organization
+
         async with session_factory() as session:
-            await session.execute(delete(Job).where(Job.queue == test_queue))
             await session.execute(delete(Worker).where(Worker.id.in_(worker_ids)))
-            await session.execute(delete(User).where(User.id == user.id))
+            await session.execute(
+                delete(Organization).where(Organization.id == org.id)
+            )
             await session.commit()
