@@ -76,6 +76,17 @@ class Settings(BaseSettings):
         return [q.strip() for q in self.worker_queues.split(",") if q.strip()]
 
     @model_validator(mode="after")
+    def _normalize_database_scheme(self) -> "Settings":
+        """Managed Postgres providers hand out postgres:// / postgresql://
+        URLs; SQLAlchemy needs the asyncpg dialect spelled out."""
+        for prefix in ("postgres://", "postgresql://"):
+            if self.database_url.startswith(prefix):
+                self.database_url = (
+                    "postgresql+asyncpg://" + self.database_url[len(prefix):]
+                )
+        return self
+
+    @model_validator(mode="after")
     def _refuse_default_secret_outside_development(self) -> "Settings":
         """Fail fast at boot: a deployment that forgot JWT_SECRET must not
         come up with a publicly known signing key (total auth bypass)."""
