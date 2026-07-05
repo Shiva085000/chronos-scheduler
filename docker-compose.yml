@@ -38,8 +38,11 @@ services:
       ENVIRONMENT: development
       DEBUG: "false"
       CORS_ORIGINS: '["http://localhost:${WEB_PORT:-3000}", "http://localhost:3000"]'
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,8 +69,12 @@ services:
     environment:
       <<: *backend_env
       WORKER_CONCURRENCY: 4
+      # Queues this worker consumes, by name (across all projects).
+      WORKER_QUEUES: default,capped,critical
       LEASE_SECONDS: 30
       HEARTBEAT_SECONDS: 10
+    volumes:
+      - ./backend:/app
     deploy:
       replicas: 2
     # Liveness = heartbeat recency: the heartbeat loop touches a file after
@@ -87,6 +94,36 @@ services:
       start_period: 20s
     # SIGTERM -> drain: finish in-flight jobs, release the rest. Must be
     # longer than SHUTDOWN_GRACE_SECONDS so compose doesn't SIGKILL early.
+    stop_grace_period: 30s
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker_sharded:
+    build: ./backend
+    command: ["python", "-m", "app.worker.main"]
+    restart: unless-stopped
+    environment:
+      <<: *backend_env
+      WORKER_CONCURRENCY: 2
+      WORKER_QUEUES: sharded
+      WORKER_SHARD: 1
+      LEASE_SECONDS: 30
+      HEARTBEAT_SECONDS: 10
+    volumes:
+      - ./backend:/app
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,sys,time; p='/tmp/chronos-worker-heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 20 else 1)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     stop_grace_period: 30s
     depends_on:
       api:
