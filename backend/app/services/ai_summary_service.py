@@ -29,12 +29,16 @@ def _make_llm():
     # Imported lazily so the worker boots instantly when the feature is off.
     from langchain_google_genai import ChatGoogleGenerativeAI
 
+    # Gemini 2.5 models spend "thinking" tokens from the same output
+    # budget; zero the thinking budget (these are short classification /
+    # summarization calls) and leave headroom so replies never truncate.
     return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
+        model=settings.gemini_model,
         google_api_key=settings.gemini_api_key,
         temperature=0.3,
-        max_output_tokens=300,
-        timeout=15,
+        max_output_tokens=1024,
+        thinking_budget=0,
+        timeout=20,
     )
 
 

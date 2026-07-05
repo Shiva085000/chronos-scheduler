@@ -66,6 +66,8 @@ class Settings(BaseSettings):
 
     # --- AI summaries ---------------------------------------------------
     gemini_api_key: str = ""
+    # Free-tier quota moves between model generations; keep it a knob.
+    gemini_model: str = "gemini-2.5-flash"
 
     # --- sharding -------------------------------------------------------
     # Pin a worker to a specific queue shard. None = consume all shards.
