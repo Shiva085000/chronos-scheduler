@@ -3,19 +3,26 @@
 Chronos is a distributed job scheduler built the way real queueing systems
 (Temporal, SQS consumers, Sidekiq/Faktory, `pg`-backed queues like Oban) are
 built: **PostgreSQL as the transactional queue of record**, lease-based worker
-liveness, at-least-once execution with idempotency support, exponential-backoff
-retries, and a dead letter queue — behind a clean FastAPI service layer and a
-Next.js operations dashboard.
+liveness, at-least-once execution with idempotency support, configurable
+retries (fixed / linear / exponential backoff), and a dead letter queue —
+behind a clean FastAPI service layer and a Next.js operations dashboard.
+
+Work is organized **organization → project → queue**: queues are first-class
+configuration objects (pause/resume, fleet-wide concurrency caps, shard keys,
+default retry policy), and jobs can be immediate, delayed (`run_at`),
+recurring (cron schedules), batched (atomic, up to 100), or chained into
+workflows via dependencies. RBAC (owner/admin/member/viewer) guards the API,
+and DLQ failures get optional AI root-cause summaries.
 
 📐 The design rationale and every tradeoff is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md), with the one-page decision defense in
 [docs/WHY.md](docs/WHY.md). For evaluators:
 [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) is an eight-section report
 (architecture, reliability, concurrency, database, decisions, verification,
-scaling limits) and [docs/DIAGRAMS.md](docs/DIAGRAMS.md) holds ten Mermaid
-diagrams of the core protocols. Everything combined, print-ready:
-[docs/Chronos-Report.pdf](docs/Chronos-Report.pdf) (design doc + measured
-benchmarks + rendered diagrams, 21pp).
+scaling limits) and [docs/DIAGRAMS.md](docs/DIAGRAMS.md) holds eleven Mermaid
+diagrams of the core protocols, including the ER diagram (§11). Everything
+combined, print-ready: [docs/Chronos-Report.pdf](docs/Chronos-Report.pdf)
+(design doc + measured benchmarks + rendered diagrams, 23pp).
 
 ## Quickstart
 
@@ -26,7 +33,7 @@ docker compose exec api python -m app.scripts.seed   # demo user + demo jobs
 
 | What | Where |
 |---|---|
-| Dashboard | http://localhost:3000 — login `demo@example.com` / `demo12345` |
+| Dashboard | http://localhost:3000 — click **Demo Login**, or `demo@example.com` / `demo12345` (read-only RBAC demo: `viewer@example.com` / `viewer12345`) |
 | OpenAPI docs (Swagger) | http://localhost:8000/docs |
 | API | http://localhost:8000/api/v1 |
 
@@ -36,7 +43,12 @@ If 8000/3000 are taken on your machine, set `API_PORT`/`WEB_PORT` in `.env`
 The seed enqueues one job of each demo task type, so within a minute you can
 watch: an instant success, a 10s job holding a lease, a job that fails twice
 and then succeeds (retry pipeline), a flaky job, and a job that exhausts its
-budget and lands in the DLQ — requeue it from the dashboard.
+budget and lands in the DLQ — requeue it from the dashboard. It also creates
+a `capped` queue (`max_concurrency=1`) fed by an atomic 3-job batch (watch
+them run strictly one at a time however many workers idle), a `*/2 * * * *`
+cron schedule, an A → B → C workflow whose steps unlock as predecessors
+succeed, a `sharded` queue consumed only by the dedicated shard worker, and
+a read-only viewer user to demo RBAC denials.
 
 ## What's demonstrated
 
@@ -45,7 +57,15 @@ budget and lands in the DLQ — requeue it from the dashboard.
 | Atomic job claiming | `SELECT … FOR UPDATE SKIP LOCKED` CTE in [backend/app/repositories/jobs.py](backend/app/repositories/jobs.py) (`claim_batch`) |
 | Heartbeats | worker loop in [backend/app/worker/runner.py](backend/app/worker/runner.py); one transaction extends worker liveness + all job leases |
 | Lease expiration & worker recovery | reaper in [backend/app/services/execution_service.py](backend/app/services/execution_service.py) (`reap_once`), advisory-locked so exactly one sweep runs cluster-wide |
-| Retry policies | pure domain logic in [backend/app/domain/retry.py](backend/app/domain/retry.py) — exponential backoff, cap, jitter; per-job policy columns |
+| Retry policies | pure domain logic in [backend/app/domain/retry.py](backend/app/domain/retry.py) — fixed / linear / exponential strategies, cap, jitter; per-job policy columns inherited from queue defaults |
+| Queue configuration | [backend/app/api/routers/queues.py](backend/app/api/routers/queues.py) — pause/resume, per-queue stats; concurrency caps enforced atomically under the queue row lock in `claim_batch` |
+| Recurring (cron) jobs | `schedules` table + advisory-locked materializer in [backend/app/services/execution_service.py](backend/app/services/execution_service.py) (`materialize_schedules_once`) — exactly-once firing, missed ticks collapse |
+| Batch jobs | `POST /jobs/batch` — one transaction, all-or-nothing, shared `batch_id` |
+| Tenancy | organizations → projects → queues ([backend/app/models/tenancy.py](backend/app/models/tenancy.py)); personal org + default project created at registration |
+| Workflow dependencies | `job_dependencies` table; the claim scan skips jobs whose prerequisites haven't succeeded ([backend/app/repositories/jobs.py](backend/app/repositories/jobs.py)) |
+| Queue sharding | queues carry `shard_key`; the `worker_sharded` compose node claims only `WORKER_SHARD=1` |
+| RBAC | owner/admin/member/viewer hierarchy in [backend/app/services/rbac.py](backend/app/services/rbac.py), enforced per endpoint |
+| AI failure summaries | [backend/app/services/ai_summary_service.py](backend/app/services/ai_summary_service.py) — Gemini root-cause notes on DLQ jobs, cached by error hash, degrades gracefully without a key |
 | Per-job execution timeout | `timeout_seconds` (default 300) enforced via `asyncio.wait_for` in [backend/app/worker/runner.py](backend/app/worker/runner.py); a timeout is a normal failure feeding the same retry/DLQ path |
 | Dead Letter Queue | `status = dead` + DLQ endpoints in [backend/app/api/routers/dlq.py](backend/app/api/routers/dlq.py), requeue from the UI |
 | Idempotency | unique partial index `(owner_id, idempotency_key)`; `Idempotency-Key` header on `POST /jobs` |
@@ -86,11 +106,16 @@ docker compose up -d worker
 
 ```bash
 # Unit tests (pure domain logic — no infrastructure needed)
-docker compose exec api python -m pytest tests/test_retry_policy.py -v
+docker compose exec api python -m pytest tests/test_retry_policy.py tests/test_cron.py -v
 
 # Concurrency integration test (proves no double-claims under 8 parallel claimers)
 docker compose exec api sh -c \
   'TEST_DATABASE_URL=$DATABASE_URL python -m pytest tests/test_claim_concurrency.py -v'
+
+# Everything (adds: pause/resume + concurrency-cap enforcement under racing
+# claimers, cron materialization exactly-once + missed-tick collapse, atomic
+# batches, queue-default inheritance, guardrails, worker resurrection)
+make test
 ```
 
 ## Configuration
@@ -109,6 +134,9 @@ All knobs are environment variables (see [backend/app/core/config.py](backend/ap
 | `HEARTBEAT_SECONDS` | 10 | heartbeat/lease-extension interval |
 | `POLL_INTERVAL_SECONDS` | 2 | claim poll fallback when Redis is quiet/down |
 | `REAPER_INTERVAL_SECONDS` | 5 | lease-expiry sweep interval |
+| `SCHEDULER_INTERVAL_SECONDS` | 5 | cron materializer sweep interval |
+| `WORKER_SHARD` | unset | if set, this worker claims only queues with that `shard_key` |
+| `GEMINI_API_KEY` | empty | enables AI failure summaries on DLQ jobs (off when empty) |
 | `WORKER_OFFLINE_AFTER_SECONDS` | 60 | missed-heartbeat threshold for offline |
 | `SHUTDOWN_GRACE_SECONDS` | 20 | drain window before releasing in-flight jobs |
 | `PRIORITY_AGING_INTERVAL_SECONDS` | 60 | waiting jobs gain +1 effective priority per interval (0 disables) |
@@ -127,13 +155,13 @@ backend/
     api/            routers + dependencies (HTTP edge)
     services/       business logic (no HTTP, no SQL strings)
     repositories/   data access, guarded UPDATEs, the claim CTE
-    domain/         pure decision logic (retry policy) — unit-testable
+    domain/         pure decision logic (retry strategies, cron) — unit-testable
     models/         SQLAlchemy 2.0 typed models
     schemas/        Pydantic DTOs
     worker/         worker runtime: registry, tasks, runner, entrypoint
     core/           config, logging, security
-  alembic/          migrations (hand-written initial schema)
-  tests/            unit + concurrency integration tests
+  alembic/          migrations (hand-written)
+  tests/            unit + concurrency/cron/batch integration tests
 frontend/           Next.js 15 dashboard (Tailwind, Recharts)
-docker-compose.yml  postgres + redis + api + worker×2 + frontend
+docker-compose.yml  postgres + redis + api + worker×2 + sharded worker + frontend
 ```

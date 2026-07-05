@@ -12,16 +12,20 @@
 
 ## 1. Executive summary
 
-Chronos is a distributed job scheduler: clients enqueue units of work over an
+Chronos is a distributed job scheduler: clients enqueue units of work —
+immediate, delayed, recurring (cron), or in atomic batches — over an
 authenticated HTTP API, and a horizontally scalable fleet of worker processes
 executes them with explicit reliability semantics — at-least-once execution,
-atomic claiming, lease-based failure detection, per-job retry policies with
-exponential backoff, a dead letter queue, idempotent enqueue, and graceful
-drain on shutdown.
+atomic claiming, lease-based failure detection, per-job retry policies
+(fixed, linear, or exponential backoff), a dead letter queue, idempotent
+enqueue, and graceful drain on shutdown. Work is organized as
+organization → project → queue; queues are first-class configuration
+objects carrying pause/resume, a fleet-wide concurrency cap, and default
+retry policy.
 
 The central design commitment is that **PostgreSQL is the only source of
-truth**. Queue state, leases, retry policy, and the execution audit trail
-live in four tables; every state transition is a single guarded `UPDATE`
+truth**. Queue state, leases, retry policy, schedule cursors, and the
+execution audit trail live in eight tables; every state transition is a single guarded `UPDATE`
 whose `WHERE` clause restates the state the writer believes in, so a stale
 actor's write is rejected by the database rather than by convention. Redis
 exists only to reduce claim latency (a pub/sub wake channel) and dashboard
@@ -36,9 +40,10 @@ recovery from `SIGKILL` of a worker mid-job (attempt recorded `lost`, retry
 succeeded on a peer ~35 s later); and `SIGTERM` drain that released an
 unfinished job back to the queue with its attempt refunded.
 
-Scope was cut deliberately rather than thinly spread: no cron schedules, no
-cancellation of running jobs, no multi-tenant fairness. Sections 13–14
-quantify the scaling ceilings and order the improvements.
+Scope was cut deliberately rather than thinly spread: no cancellation of
+running jobs, no multi-tenant fairness quotas, no per-schedule timezones
+(cron is UTC-only). Sections 13–14 quantify the scaling ceilings and order
+the improvements.
 
 ---
 
@@ -78,12 +83,20 @@ of invariants, because the operators of such a system are its first users.
 |---|---|
 | F1 | Authenticated users enqueue jobs: task name, JSON payload, queue, priority (−100..100), optional future `run_at`, retry policy |
 | F2 | Workers execute jobs concurrently; each ready job is handed to exactly one worker at a time |
-| F3 | Failed jobs retry per policy (max attempts, exponential backoff with cap and jitter) |
+| F3 | Failed jobs retry per policy (max attempts; fixed, linear, or exponential backoff with cap and jitter) |
 | F4 | Jobs that exhaust their budget enter a dead letter queue; DLQ jobs can be inspected and requeued with a fresh budget |
 | F5 | Enqueue is idempotent under a client-supplied key (body field or `Idempotency-Key` header) |
 | F6 | Pending jobs can be cancelled; running jobs cannot (documented) |
 | F7 | Full execution history per job (which worker, when, outcome, error) |
-| F8 | Operations dashboard: cluster stats, throughput, job/DLQ/worker views |
+| F8 | Operations dashboard: cluster stats, throughput, queue/job/schedule/DLQ/worker views |
+| F9 | Tenancy: organization → project → queue; users manage projects and queues within their organization |
+| F10 | Queues are configurable: pause/resume, fleet-wide concurrency cap, default retry policy inherited by jobs that don't set their own |
+| F11 | Recurring (cron) schedules materialize ordinary jobs; missed ticks collapse into a single firing |
+| F12 | Batch enqueue: up to 100 jobs in one transaction, all-or-nothing, sharing a `batch_id` |
+| F13 | Workflow dependencies: a job with `depends_on` becomes claimable only after all its prerequisites SUCCEED |
+| F14 | Queue sharding: queues carry a `shard_key`; a worker started with `WORKER_SHARD` claims only its shard |
+| F15 | RBAC: owner/admin/member/viewer hierarchy enforced per endpoint |
+| F16 | AI failure summaries: DLQ errors get an operator-facing root-cause summary (Gemini; cached by error hash; absent key degrades to nothing) |
 
 ### 3.2 Non-functional
 
@@ -99,11 +112,13 @@ of invariants, because the operators of such a system are its first users.
 
 ### 3.3 Explicit non-goals
 
-Cron/recurring schedules; exactly-once side effects (impossible across
-failure domains — §10 explains what is offered instead); cancellation of
-in-flight handlers; multi-region; per-tenant fairness/quotas; sub-second
-scheduling precision (claim granularity is the 2 s poll fallback, usually
-masked by the wake channel).
+Exactly-once side effects (impossible across failure domains — §10 explains
+what is offered instead); cancellation of in-flight handlers; multi-region;
+per-tenant fairness/quotas; per-schedule timezones (cron is evaluated in
+UTC — DST-ambiguous local times are exactly the class of bug this system
+exists to avoid; clients localize for display); sub-second scheduling
+precision (claim granularity is the 2 s poll fallback, usually masked by
+the wake channel; schedule granularity is the 5 s materializer tick).
 
 ---
 
@@ -179,16 +194,51 @@ API horizontally requires extracting a one-shot migrate job (§14).
 
 ### 5.1 Schema
 
-Four tables. The design principle: `jobs` is a narrow, update-hot
-state-machine record; everything historical is append-only elsewhere.
+Nine tables (ER diagram: DIAGRAMS.md §11). The design principle: `jobs` is
+a narrow, update-hot state-machine record; everything historical is
+append-only elsewhere, and everything configurational lives on the entity
+that owns it (queue rows), snapshotted onto jobs at enqueue.
 
-**`jobs`** — identity (`owner_id`, `queue`, `task_name`, `payload JSONB`),
+**`organizations` / `projects`** — the tenancy chain. Every user gets a
+personal org and a `default` project at registration (one transaction), so
+"which project?" always has an answer and enqueue never needs a setup
+dance. Access control is a single org-id comparison; `projects` are unique
+by `(org_id, name)`.
+
+**`queues`** — first-class configuration objects, unique by
+`(project_id, name)`, auto-created on first use. Operator controls
+(`paused`, `max_concurrency`, `shard_key`) are read *inside the claiming
+transaction*, so a pause takes effect at the next claim with no worker
+coordination; capped queues are admitted under `FOR UPDATE` of the queue
+row, making the running-count check and the admission atomic (§6). Default
+retry policy lives here and is copied to jobs at enqueue — editing a queue
+never mutates in-flight work.
+
+**`schedules`** — recurring (cron) work: a job template plus a cursor
+(`next_run_at`, partial-indexed on unpaused rows). The materializer (an
+advisory-locked sweep hosted by every worker, like the reaper) turns due
+schedules into ordinary `jobs` rows; firing is exactly-once because the
+insert and the cursor advance commit atomically, backstopped by the
+deterministic idempotency key `schedule:<id>:<fire-time>`. Missed ticks
+collapse into a single firing.
+
+**`jobs`** — identity (`owner_id`, `queue_id` + denormalized `queue` name,
+`task_name`, `payload JSONB`, optional `batch_id`/`workflow_id`),
 scheduling (`status`, `priority`, `run_at`), execution policy denormalized
-as five columns (`max_attempts`, `timeout_seconds`, `backoff_base_seconds`,
+as six columns (`backoff_strategy` — fixed/linear/exponential —
+`max_attempts`, `timeout_seconds`, `backoff_base_seconds`,
 `backoff_factor`, `backoff_max_seconds` — copied at enqueue so a default
 change never mutates in-flight jobs), lease (`locked_by → workers`,
-`lease_expires_at`), outcome (`result JSONB`, `last_error`), timestamps. `attempt_count` lives here
-because the claim increments it atomically.
+`lease_expires_at`), outcome (`result JSONB`, `last_error`, optional
+`ai_summary`), timestamps. `attempt_count` lives here because the claim
+increments it atomically. The queue *name* is denormalized because the
+worker fleet subscribes by name across projects; the claim scan filters on
+the name and joins the row for its controls.
+
+**`job_dependencies`** — workflow edges (`job_id` depends on
+`depends_on_job_id`, unique per pair). The claim scan excludes jobs with
+unmet dependencies, so a dependent job becomes claimable the instant its
+last prerequisite succeeds — no orchestrator process.
 
 **`job_attempts`** — one row per claim, opened in the claim transaction,
 closed exactly once as `succeeded | failed | lost | aborted` with error text
@@ -201,7 +251,10 @@ one.
 `concurrency`, `last_heartbeat_at`, `started_at`, `stopped_at`.
 Observational only: nothing in the correctness path reads it (§7.1).
 
-**`users`** — email (unique, normalized) + bcrypt hash.
+**`users`** — email (unique, normalized), bcrypt hash, `org_id`, and an
+RBAC `role` (owner > admin > member > viewer, checked by rank at the API
+edge: job mutations require member+, queue configuration admin+, role
+management owner).
 
 ### 5.2 State machine
 
@@ -229,8 +282,13 @@ taxes claim/heartbeat/finalize with WAL and page churn:
 |---|---|---|
 | `ix_jobs_claim (priority DESC, run_at) WHERE status='pending'` | partial | claim CTE — matches its predicate and sort exactly; **size tracks backlog, not history**, so claim cost is independent of total table size |
 | `ix_jobs_lease (lease_expires_at) WHERE status='running'` | partial | reaper's expiry scan |
-| `uq_jobs_owner_idempotency (owner_id, idempotency_key) WHERE idempotency_key IS NOT NULL` | unique partial | idempotent enqueue — the index is the correctness mechanism, not an optimization (§10) |
+| `uq_jobs_owner_idempotency (owner_id, idempotency_key) WHERE idempotency_key IS NOT NULL` | unique partial | idempotent enqueue — the index is the correctness mechanism, not an optimization (§10); also the exactly-once backstop for schedule firings |
 | `ix_jobs_owner_created (owner_id, created_at DESC)` | btree | owner-scoped listing |
+| `ix_jobs_queue_running (queue_id) WHERE status='running'` | partial | concurrency-cap admission count — proportional to in-flight work, not history |
+| `ix_jobs_batch (batch_id) WHERE batch_id IS NOT NULL` | partial | batch tracking |
+| `ix_jobs_workflow (workflow_id) WHERE workflow_id IS NOT NULL` | partial | workflow views |
+| `ix_schedules_due (next_run_at) WHERE NOT paused` | partial | the materializer's scan |
+| `ix_job_deps_depends_on (depends_on_job_id)` | btree | dependency-gate subquery in the claim scan |
 | `ix_job_attempts_job_number`, `ix_job_attempts_finished` | btree | attempt history; throughput-by-minute |
 
 Deliberately absent: indexes on `task_name`, bare `queue`, `payload`
@@ -671,9 +729,11 @@ Ordered by value per unit effort; each preserves the core property
    reintroduces the dual-write problem deliberately and pays for it with a
    relay component. Each earlier step is roughly an order of magnitude
    cheaper than the next.
-9. **Recurring schedules** (`schedules` table materializing `jobs` rows) —
-   the claim path is already compatible; excluded from v1 to protect depth
-   over breadth.
+9. ~~**Recurring schedules**~~ — **implemented**: a `schedules` table
+   materializes `jobs` rows via an advisory-locked sweep (one winner per
+   tick, exactly-once firing via the idempotency index, missed ticks
+   collapse). Remaining refinement: per-schedule timezones, deliberately
+   excluded (UTC-only, §3.3).
 
 ---
 

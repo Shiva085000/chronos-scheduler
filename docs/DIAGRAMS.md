@@ -17,13 +17,13 @@ flowchart LR
   end
 
   subgraph Data
-    PG[(PostgreSQL<br/>jobs · attempts · workers · users)]
+    PG[(PostgreSQL<br/>orgs · projects · queues · jobs<br/>schedules · attempts · workers · users)]
     RD[(Redis<br/>wake channel · stats cache)]
   end
 
   subgraph Fleet["Worker fleet ×N"]
-    W1[worker<br/>consume · heartbeat · reaper]
-    W2[worker<br/>consume · heartbeat · reaper]
+    W1[worker<br/>consume · heartbeat · reaper · scheduler]
+    W2[worker<br/>consume · heartbeat · reaper · scheduler]
   end
 
   UI -->|HTTPS + JWT| API
@@ -194,3 +194,94 @@ sequenceDiagram
   W->>W: log lease_lost, discard result
   Note over PG: reaper's verdict stands.<br/>State consistent; side effects may<br/>duplicate — at-least-once by design
 ```
+
+## 11. ER diagram
+
+```mermaid
+erDiagram
+  ORGANIZATIONS ||--o{ USERS : "has members"
+  ORGANIZATIONS ||--o{ PROJECTS : owns
+  PROJECTS ||--o{ QUEUES : owns
+  QUEUES ||--o{ JOBS : "configures & feeds"
+  QUEUES ||--o{ SCHEDULES : targets
+  USERS ||--o{ JOBS : enqueues
+  USERS ||--o{ SCHEDULES : owns
+  JOBS ||--o{ JOB_ATTEMPTS : "audited by"
+  WORKERS o|--o{ JOBS : "holds lease (locked_by)"
+  WORKERS o|--o{ JOB_ATTEMPTS : executed
+
+  ORGANIZATIONS {
+    uuid id PK
+    string name
+    timestamptz created_at
+  }
+  USERS {
+    uuid id PK
+    uuid org_id FK "CASCADE"
+    string email UK
+    string password_hash
+  }
+  PROJECTS {
+    uuid id PK
+    uuid org_id FK "CASCADE"
+    string name "unique per org"
+  }
+  QUEUES {
+    uuid id PK
+    uuid project_id FK "CASCADE"
+    string name "unique per project"
+    bool paused
+    int max_concurrency "NULL = unlimited"
+    enum default_backoff_strategy "fixed|linear|exponential"
+    int default_max_attempts "+ base/factor/cap/timeout defaults"
+  }
+  JOBS {
+    uuid id PK
+    uuid owner_id FK "users, CASCADE"
+    uuid queue_id FK "queues, CASCADE"
+    string queue "denormalized name (claim scan)"
+    uuid batch_id "NULL unless batch-created"
+    string task_name
+    jsonb payload
+    enum status "pending|running|succeeded|cancelled|dead"
+    int priority
+    timestamptz run_at "delayed/scheduled execution"
+    string idempotency_key "unique per owner (partial)"
+    enum backoff_strategy
+    int max_attempts "+ attempt_count, base, factor, cap, timeout"
+    uuid locked_by FK "workers, SET NULL"
+    timestamptz lease_expires_at "lease while RUNNING"
+  }
+  SCHEDULES {
+    uuid id PK
+    uuid owner_id FK "users, CASCADE"
+    uuid queue_id FK "queues, CASCADE"
+    string cron_expr "5-field cron, UTC"
+    bool paused
+    timestamptz next_run_at "cursor; partial index on unpaused"
+    timestamptz last_run_at
+    jsonb payload "+ full retry-policy template"
+  }
+  JOB_ATTEMPTS {
+    uuid id PK
+    uuid job_id FK "CASCADE"
+    uuid worker_id FK "SET NULL"
+    int attempt_number
+    enum status "running|succeeded|failed|lost|aborted"
+    text error
+  }
+  WORKERS {
+    uuid id PK
+    string name
+    enum status "online|draining|offline"
+    int concurrency
+    timestamptz last_heartbeat_at
+  }
+```
+
+Key index/constraint decisions (details in DESIGN_DOC §5): the claim path
+uses a *partial* index on pending jobs `(priority DESC, run_at)`; leases use
+a partial index on running jobs; idempotency is a unique partial index on
+`(owner_id, idempotency_key)`; per-queue running counts use a partial index
+on `(queue_id) WHERE status='running'`; the DLQ is `status = 'dead'`, not a
+table — a dead job keeps its identity, payload and attempt history.

@@ -295,11 +295,14 @@ Chosen-simple things and what their production evolution looks like:
 - **Completed-job growth** → partition `jobs` by status/time or archive
   terminal rows to a history table; the partial indexes already isolate the
   hot set.
-- **Claim contention beyond ~10³/s** → per-queue sharding, then a
-  purpose-built broker with the outbox pattern.
-- **Cron/recurring jobs** → a `schedules` table materializing `jobs` rows;
-  the claim path is unchanged (out of scope: feature count was explicitly not
-  the goal).
+- **Claim contention beyond ~10³/s** → per-queue sharding (a first cut is
+  built: queues carry a `shard_key` and a worker started with
+  `WORKER_SHARD` claims only its shard), then a purpose-built broker with
+  the outbox pattern.
+- ~~**Cron/recurring jobs**~~ → **built**: a `schedules` table materializes
+  `jobs` rows via an advisory-locked sweep (same pattern as the reaper);
+  the claim path is unchanged, firing is exactly-once via the idempotency
+  index, and missed ticks collapse into a single run.
 - **Multi-tenant fairness** → per-owner token buckets in the claim CTE.
 - **Cancellation of RUNNING jobs** → cooperative cancel flags checked by
   handlers; not faked here — killing coroutines mid-side-effect is worse than
