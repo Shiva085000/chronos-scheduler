@@ -96,7 +96,7 @@ of invariants, because the operators of such a system are its first users.
 | F13 | Workflow dependencies: a job with `depends_on` becomes claimable only after all its prerequisites SUCCEED |
 | F14 | Queue sharding: queues carry a `shard_key`; a worker started with `WORKER_SHARD` claims only its shard |
 | F15 | RBAC: owner/admin/member/viewer hierarchy enforced per endpoint |
-| F16 | AI failure summaries: DLQ errors get an operator-facing root-cause summary (Gemini; cached by error hash; absent key degrades to nothing) |
+| F16 | AI failure summaries: a multi-agent LangGraph pipeline (triage → diagnose → remediate → compose, conditional routing) turns DLQ errors into operator-facing notes (Gemini; cached by error hash; absent key degrades to nothing) |
 
 ### 3.2 Non-functional
 

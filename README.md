@@ -75,7 +75,7 @@ a read-only viewer user to demo RBAC denials.
 | Workflow dependencies | `job_dependencies` table; the claim scan skips jobs whose prerequisites haven't succeeded ([backend/app/repositories/jobs.py](backend/app/repositories/jobs.py)) |
 | Queue sharding | queues carry `shard_key`; the `worker_sharded` compose node claims only `WORKER_SHARD=1` |
 | RBAC | owner/admin/member/viewer hierarchy in [backend/app/services/rbac.py](backend/app/services/rbac.py), enforced per endpoint |
-| AI failure summaries | [backend/app/services/ai_summary_service.py](backend/app/services/ai_summary_service.py) — Gemini root-cause notes on DLQ jobs, cached by error hash, degrades gracefully without a key |
+| AI failure summaries | multi-agent **LangGraph** pipeline in [backend/app/services/failure_pipeline.py](backend/app/services/failure_pipeline.py) — triage → diagnose → remediate → compose over Gemini, with conditional routing (transient failures skip deep diagnosis); cached by error hash, degrades gracefully without a key |
 | Per-job execution timeout | `timeout_seconds` (default 300) enforced via `asyncio.wait_for` in [backend/app/worker/runner.py](backend/app/worker/runner.py); a timeout is a normal failure feeding the same retry/DLQ path |
 | Dead Letter Queue | `status = dead` + DLQ endpoints in [backend/app/api/routers/dlq.py](backend/app/api/routers/dlq.py), requeue from the UI |
 | Idempotency | unique partial index `(owner_id, idempotency_key)`; `Idempotency-Key` header on `POST /jobs` |

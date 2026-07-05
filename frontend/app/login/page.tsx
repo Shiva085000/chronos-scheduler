@@ -77,7 +77,7 @@ export default function LoginPage() {
               <span className="w-full border-t" />
             </div>
             <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-card px-2 text-muted">or use credentials</span>
+              <span className="bg-surface px-2 text-muted">or use credentials</span>
             </div>
           </div>
 

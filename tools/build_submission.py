@@ -86,9 +86,9 @@ channel) and dashboard load.
   (why Postgres over a broker, why leases over liveness pings, why
   at-least-once, why the DLQ is a status and not a table…).
 - **Bonus features implemented:** workflow dependencies, queue sharding,
-  RBAC (owner/admin/member/viewer), AI failure summaries, distributed
-  locking (advisory locks), event-driven execution (wake channel), and
-  login rate limiting.
+  RBAC (owner/admin/member/viewer), AI failure analysis via a multi-agent
+  LangGraph pipeline, distributed locking (advisory locks), event-driven
+  execution (wake channel), and login rate limiting.
 
 ## Live demo & source
 
@@ -149,7 +149,7 @@ minute, and a sharded queue served only by the shard worker.
 | Event-driven execution | ✅ | Redis pub/sub wake channel; poll fallback keeps correctness when Redis is down |
 | WebSocket live updates | ➖ | polling chosen (explicitly permitted); tradeoff documented |
 | Role-based access control | ✅ | owner > admin > member > viewer, enforced per endpoint |
-| AI-generated failure summaries | ✅ | Gemini root-cause notes on DLQ jobs, cached by error hash, degrades gracefully without an API key |
+| AI-generated failure summaries | ✅ | multi-agent **LangGraph** pipeline (triage → diagnose → remediate → compose, conditional routing: transient failures skip deep diagnosis) over Gemini; cached by error hash; degrades gracefully without an API key |
 
 ### Deliverables
 
