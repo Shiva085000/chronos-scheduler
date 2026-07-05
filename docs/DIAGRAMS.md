@@ -192,7 +192,7 @@ sequenceDiagram
   W->>PG: UPDATE ... WHERE status='running'<br/>AND locked_by = W
   PG-->>W: 0 rows — lease lost
   W->>W: log lease_lost, discard result
-  Note over PG: reaper's verdict stands.<br/>State consistent; side effects may<br/>duplicate — at-least-once by design
+  Note over PG: reaper's verdict stands.<br/>State consistent — side effects may<br/>duplicate: at-least-once by design
 ```
 
 ## 11. ER diagram

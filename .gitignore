@@ -22,3 +22,6 @@ notes/
 
 # generated (rebuild with tools/build_report.py)
 docs/Chronos-Report.html
+
+# generated (rebuild with tools/build_submission.py)
+docs/Chronos-Submission.html
