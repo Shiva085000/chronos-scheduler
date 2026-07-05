@@ -8,7 +8,16 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import Job, JobAttempt, User, Worker  # noqa: F401 — register tables
+from app.models import (  # noqa: F401 — register tables
+    Job,
+    JobAttempt,
+    Organization,
+    Project,
+    Queue,
+    Schedule,
+    User,
+    Worker,
+)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

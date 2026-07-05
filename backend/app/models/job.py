@@ -20,6 +20,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.domain.retry import RetryStrategy
+from app.models.queue import retry_strategy_enum
 
 
 class JobStatus(str, enum.Enum):
@@ -67,8 +69,28 @@ class Job(Base):
         nullable=False,
     )
 
+    # The configuration authority for this job (pause / concurrency cap /
+    # defaults). The name is denormalized alongside because the worker fleet
+    # subscribes to queues *by name* (WORKER_QUEUES=default,critical) across
+    # all projects — the claim scan filters on the name, then joins the row
+    # for its controls.
+    queue_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("queues.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     queue: Mapped[str] = mapped_column(String(100), nullable=False, default="default")
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Set when the job was created through POST /jobs/batch; groups the
+    # batch for listing/inspection. NULL for individually enqueued jobs.
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    # Groups jobs that form a workflow DAG (dependency chain). Set by the
+    # API when enqueuing a job with depends_on. NULL for standalone jobs.
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
@@ -87,6 +109,9 @@ class Job(Base):
     # --- retry policy (denormalized onto the job so a policy change never
     # --- retroactively alters in-flight jobs) ---------------------------
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    backoff_strategy: Mapped[RetryStrategy] = mapped_column(
+        retry_strategy_enum, nullable=False, default=RetryStrategy.EXPONENTIAL
+    )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Wall-clock budget for a single execution attempt, enforced by the
     # worker via asyncio.wait_for. A timeout is a normal failure: it burns
@@ -107,6 +132,9 @@ class Job(Base):
     )
 
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AI-generated plain-English explanation of why the job failed,
+    # populated when a job lands in the DLQ. NULL until then.
+    ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -151,6 +179,25 @@ class Job(Base):
         ),
         # Owner-scoped listing, newest first.
         Index("ix_jobs_owner_created", "owner_id", text("created_at DESC")),
+        # Concurrency-cap check: count RUNNING jobs per queue. Partial, so it
+        # stays proportional to in-flight work, not history.
+        Index(
+            "ix_jobs_queue_running",
+            "queue_id",
+            postgresql_where=text("status = 'running'"),
+        ),
+        # Batch lookup.
+        Index(
+            "ix_jobs_batch",
+            "batch_id",
+            postgresql_where=text("batch_id IS NOT NULL"),
+        ),
+        # Workflow lookup.
+        Index(
+            "ix_jobs_workflow",
+            "workflow_id",
+            postgresql_where=text("workflow_id IS NOT NULL"),
+        ),
         CheckConstraint("max_attempts BETWEEN 1 AND 20", name="max_attempts_range"),
         CheckConstraint("priority BETWEEN -100 AND 100", name="priority_range"),
         CheckConstraint(
