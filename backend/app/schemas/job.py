@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domain.retry import RetryStrategy
 from app.models.attempt import AttemptStatus
 from app.models.job import JobStatus
 
@@ -18,7 +19,21 @@ class JobCreate(BaseModel):
     task_name: str = Field(min_length=1, max_length=255, examples=["demo.sleep"])
     payload: dict[str, Any] = Field(default_factory=dict)
     queue: str = Field(default="default", min_length=1, max_length=100)
+    project_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Project owning the queue. Omit to use your organization's "
+            "default project. Unknown queue names are created on first use."
+        ),
+    )
     priority: int = Field(default=0, ge=-100, le=100)
+    backoff_strategy: RetryStrategy = Field(
+        default=RetryStrategy.EXPONENTIAL,
+        description=(
+            "fixed: base delay every retry; linear: base × attempt; "
+            "exponential: base × factor^(attempt−1). All capped and jittered."
+        ),
+    )
     run_at: dt.datetime | None = Field(
         default=None, description="Schedule for the future; omit to run ASAP"
     )
@@ -45,6 +60,15 @@ class JobCreate(BaseModel):
             "May also be supplied via the Idempotency-Key header."
         ),
     )
+    depends_on: list[uuid.UUID] = Field(
+        default_factory=list,
+        max_length=50,
+        description=(
+            "Job IDs that must SUCCEED before this job becomes claimable. "
+            "Creates a workflow DAG. All referenced jobs must belong to the "
+            "same owner."
+        ),
+    )
 
     @field_validator("payload")
     @classmethod
@@ -63,8 +87,11 @@ class JobRead(BaseModel):
 
     id: uuid.UUID
     owner_id: uuid.UUID
+    queue_id: uuid.UUID
     queue: str
     task_name: str
+    batch_id: uuid.UUID | None
+    workflow_id: uuid.UUID | None
     payload: dict[str, Any]
     status: JobStatus
     priority: int
@@ -72,6 +99,7 @@ class JobRead(BaseModel):
     idempotency_key: str | None
     max_attempts: int
     attempt_count: int
+    backoff_strategy: RetryStrategy
     timeout_seconds: int
     backoff_base_seconds: int
     backoff_factor: float
@@ -79,11 +107,26 @@ class JobRead(BaseModel):
     locked_by: uuid.UUID | None
     lease_expires_at: dt.datetime | None
     last_error: str | None
+    ai_summary: str | None
     result: dict[str, Any] | None
     created_at: dt.datetime
     updated_at: dt.datetime
     started_at: dt.datetime | None
     finished_at: dt.datetime | None
+
+
+# All-or-nothing: the whole batch is inserted in one transaction and shares
+# one batch_id, so a partially-created batch cannot exist.
+MAX_BATCH_SIZE = 100
+
+
+class BatchCreate(BaseModel):
+    jobs: list[JobCreate] = Field(min_length=1, max_length=MAX_BATCH_SIZE)
+
+
+class BatchRead(BaseModel):
+    batch_id: uuid.UUID
+    jobs: list[JobRead]
 
 
 class AttemptRead(BaseModel):
@@ -97,3 +140,11 @@ class AttemptRead(BaseModel):
     error: str | None
     started_at: dt.datetime
     finished_at: dt.datetime | None
+
+
+class DependencyRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    depends_on_job_id: uuid.UUID

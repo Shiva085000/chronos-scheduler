@@ -24,5 +24,9 @@ class AuthenticationError(ServiceError):
     pass
 
 
+class ForbiddenError(ServiceError):
+    """RBAC: the user's role lacks the required permission."""
+
+
 class EmailAlreadyRegisteredError(ServiceError):
     pass

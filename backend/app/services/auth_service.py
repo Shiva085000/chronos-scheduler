@@ -5,7 +5,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models import User
+from app.models import Organization, Project, User
+from app.repositories.tenancy import TenancyRepository
 from app.repositories.users import UserRepository
 from app.services.exceptions import (
     AuthenticationError,
@@ -22,8 +23,20 @@ class AuthService:
         self.users = UserRepository(session)
 
     async def register(self, email: str, password: str) -> User:
+        """Create the user plus their personal organization and a "default"
+        project, atomically — every user always has a place to put queues."""
         normalized = email.strip().lower()
-        user = User(email=normalized, password_hash=hash_password(password))
+        tenancy = TenancyRepository(self.session)
+        org = tenancy.add_org(Organization(name=normalized))
+        # Flush so org.id (assigned at INSERT, not construction) exists
+        # before the rows that reference it are built. Orgs carry no unique
+        # constraints, so this flush cannot raise the duplicate-email error
+        # handled below — that still surfaces at commit.
+        await self.session.flush()
+        tenancy.add_project(Project(org_id=org.id, name="default"))
+        user = User(
+            email=normalized, password_hash=hash_password(password), org_id=org.id
+        )
         self.users.add(user)
         try:
             await self.session.commit()

@@ -15,8 +15,10 @@ from typing import Any
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.models import Job, JobStatus
+from app.models import Job, JobStatus, Queue
+from app.models.job_dependency import JobDependency
 
 
 def _db_now_plus(seconds: float):
@@ -62,6 +64,7 @@ class JobRepository:
         *,
         status: JobStatus | None = None,
         queue: str | None = None,
+        batch_id: uuid.UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Job], int]:
@@ -70,6 +73,8 @@ class JobRepository:
             conditions.append(Job.status == status)
         if queue is not None:
             conditions.append(Job.queue == queue)
+        if batch_id is not None:
+            conditions.append(Job.batch_id == batch_id)
 
         total = (
             await self.session.execute(
@@ -91,43 +96,9 @@ class JobRepository:
     # atomic claim (the hot path)
     # ------------------------------------------------------------------
 
-    async def claim_batch(
-        self,
-        worker_id: uuid.UUID,
-        *,
-        queues: list[str],
-        limit: int,
-        lease_seconds: int,
-        aging_interval_seconds: int = 60,
-        aging_max_boost: int = 200,
-    ) -> list[Job]:
-        """Atomically claim up to `limit` ready jobs from `queues`.
-
-        WITH candidates AS (
-            SELECT id FROM jobs
-            WHERE status = 'pending' AND run_at <= now() AND queue = ANY(...)
-            ORDER BY effective_priority DESC, run_at, created_at
-            LIMIT :n
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE jobs SET status='running', locked_by=..., ... FROM candidates ...
-        RETURNING jobs.*
-
-        SKIP LOCKED makes concurrent claimers pass over rows another
-        transaction has already locked instead of blocking or double-
-        claiming — each ready job is handed to exactly one worker.
-
-        Starvation bound: effective priority = priority + one point per
-        `aging_interval_seconds` waited since becoming ready, capped at
-        `aging_max_boost`. With the defaults (60s, 200) the lowest-priority
-        job (-100) outranks a sustained stream of +100 jobs after at most
-        200 minutes. The `run_at <= now()` predicate keeps the wait
-        non-negative. Cost: the ready set is sorted by a computed key, so
-        the claim index filters but no longer pre-sorts — acceptable while
-        the ready set is small (it is, by design: the partial index tracks
-        backlog, not history). Set aging_interval_seconds=0 to restore
-        strict priority order.
-        """
+    @staticmethod
+    def _priority_key(aging_interval_seconds: int, aging_max_boost: int):
+        """Effective-priority sort key with bounded aging (see claim_batch)."""
         if aging_interval_seconds > 0:
             age_boost = func.least(
                 func.floor(
@@ -136,22 +107,30 @@ class JobRepository:
                 ),
                 aging_max_boost,
             )
-            priority_key = (Job.priority + age_boost).desc()
-        else:
-            priority_key = Job.priority.desc()
+            return (Job.priority + age_boost).desc()
+        return Job.priority.desc()
 
-        candidates = (
-            select(Job.id)
-            .where(
-                Job.status == JobStatus.PENDING,
-                Job.run_at <= func.now(),
-                Job.queue.in_(queues),
-            )
-            .order_by(priority_key, Job.run_at.asc(), Job.created_at.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-            .cte("candidates")
+    async def _claim_where(
+        self,
+        worker_id: uuid.UUID,
+        *,
+        candidates_stmt,
+        lease_seconds: int,
+    ) -> list[Job]:
+        """Shared claim tail: lock candidates, flip them to RUNNING.
+
+        WITH candidates AS (
+            SELECT id FROM jobs WHERE ... ORDER BY ... LIMIT :n
+            FOR UPDATE [OF jobs] SKIP LOCKED
         )
+        UPDATE jobs SET status='running', locked_by=..., ... FROM candidates ...
+        RETURNING jobs.*
+
+        SKIP LOCKED makes concurrent claimers pass over rows another
+        transaction has already locked instead of blocking or double-
+        claiming — each ready job is handed to exactly one worker.
+        """
+        candidates = candidates_stmt.cte("candidates")
         stmt = (
             update(Job)
             .where(Job.id == candidates.c.id)
@@ -168,6 +147,161 @@ class JobRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def claim_batch(
+        self,
+        worker_id: uuid.UUID,
+        *,
+        queues: list[str],
+        limit: int,
+        lease_seconds: int,
+        aging_interval_seconds: int = 60,
+        aging_max_boost: int = 200,
+        shard_key: int | None = None,
+    ) -> list[Job]:
+        """Atomically claim up to `limit` ready jobs from `queues` (by name).
+
+        Two passes so queue controls cost nothing on the common path:
+
+        1. **Uncapped queues** — the original lock-free scan, now joined to
+           `queues` to exclude paused queues and queues with a concurrency
+           cap. `FOR UPDATE OF jobs SKIP LOCKED` locks only job rows, so
+           any number of claimers work these queues in parallel.
+        2. **Capped queues** — the queue *row* is locked first
+           (FOR UPDATE SKIP LOCKED), making the running-count check and
+           the admission atomic: the cap cannot be exceeded, ever, at the
+           price of one claimer at a time per capped queue. A claimer that
+           finds the row locked skips the queue this round instead of
+           waiting (no deadlocks, no pile-ups).
+
+        Starvation bound: effective priority = priority + one point per
+        `aging_interval_seconds` waited since becoming ready, capped at
+        `aging_max_boost`. With the defaults (60s, 200) the lowest-priority
+        job (-100) outranks a sustained stream of +100 jobs after at most
+        200 minutes. The `run_at <= now()` predicate keeps the wait
+        non-negative. Cost: the ready set is sorted by a computed key, so
+        the claim index filters but no longer pre-sorts — acceptable while
+        the ready set is small (it is, by design: the partial index tracks
+        backlog, not history). Set aging_interval_seconds=0 to restore
+        strict priority order.
+        """
+        priority_key = self._priority_key(aging_interval_seconds, aging_max_boost)
+        order = (priority_key, Job.run_at.asc(), Job.created_at.asc())
+
+        # Dependency filter: exclude jobs with unmet workflow deps.
+        # We use an aliased Job (DepJob) so the subquery doesn't collide
+        # with the outer Job reference.
+        DepJob = aliased(Job, flat=True)
+        unmet_dep = (
+            select(JobDependency.id)
+            .join(
+                DepJob,
+                DepJob.id == JobDependency.depends_on_job_id,
+            )
+            .where(
+                JobDependency.job_id == Job.id,
+                DepJob.status != JobStatus.SUCCEEDED,
+            )
+            .correlate(Job)
+            .exists()
+        )
+
+        base_filters = [
+            Job.status == JobStatus.PENDING,
+            Job.run_at <= func.now(),
+            Job.queue.in_(queues),
+            Queue.paused.is_(False),
+            ~unmet_dep,
+        ]
+        if shard_key is not None:
+            base_filters.append(Queue.shard_key == shard_key)
+
+        uncapped = (
+            select(Job.id)
+            .join(Queue, Queue.id == Job.queue_id)
+            .where(
+                *base_filters,
+                Queue.max_concurrency.is_(None),
+            )
+            .order_by(*order)
+            .limit(limit)
+            .with_for_update(skip_locked=True, of=Job)
+        )
+        claimed = await self._claim_where(
+            worker_id, candidates_stmt=uncapped, lease_seconds=lease_seconds
+        )
+
+        remaining = limit - len(claimed)
+        if remaining > 0:
+            claimed += await self._claim_capped(
+                worker_id,
+                queues=queues,
+                limit=remaining,
+                lease_seconds=lease_seconds,
+                order=order,
+            )
+        return claimed
+
+    async def _claim_capped(
+        self,
+        worker_id: uuid.UUID,
+        *,
+        queues: list[str],
+        limit: int,
+        lease_seconds: int,
+        order,
+    ) -> list[Job]:
+        """Claim from concurrency-capped queues under their row locks."""
+        capped_rows = (
+            await self.session.execute(
+                select(Queue.id, Queue.max_concurrency)
+                .where(
+                    Queue.name.in_(queues),
+                    Queue.paused.is_(False),
+                    Queue.max_concurrency.is_not(None),
+                )
+                .order_by(Queue.id)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+
+        claimed: list[Job] = []
+        remaining = limit
+        for queue_id, cap in capped_rows:
+            if remaining <= 0:
+                break
+            # Safe to count-then-claim: we hold this queue's row lock, and
+            # every admission into a capped queue happens under that lock.
+            running = (
+                await self.session.execute(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.queue_id == queue_id,
+                        Job.status == JobStatus.RUNNING,
+                    )
+                )
+            ).scalar_one()
+            capacity = min(cap - running, remaining)
+            if capacity <= 0:
+                continue
+            candidates = (
+                select(Job.id)
+                .where(
+                    Job.status == JobStatus.PENDING,
+                    Job.run_at <= func.now(),
+                    Job.queue_id == queue_id,
+                )
+                .order_by(*order)
+                .limit(capacity)
+                .with_for_update(skip_locked=True)
+            )
+            batch = await self._claim_where(
+                worker_id, candidates_stmt=candidates, lease_seconds=lease_seconds
+            )
+            claimed.extend(batch)
+            remaining -= len(batch)
+        return claimed
 
     # ------------------------------------------------------------------
     # lease maintenance
@@ -390,3 +524,14 @@ class JobRepository:
             )
         ).one()
         return int(row[0]), int(row[1])
+
+    async def set_ai_summary(
+        self, job_id: uuid.UUID, summary: str
+    ) -> None:
+        """Store an AI-generated failure summary on a DLQ job."""
+        await self.session.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(ai_summary=summary, updated_at=func.now())
+            .execution_options(synchronize_session=False)
+        )

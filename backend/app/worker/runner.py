@@ -43,8 +43,8 @@ class WorkerRunner:
         self.settings = settings
         self.id = uuid.uuid4()
         self.name = name
-        self.executor = ExecutionService(SessionFactory)
         self.bus = EventBus(settings.redis_url)
+        self.executor = ExecutionService(SessionFactory, bus=self.bus)
         self._draining = asyncio.Event()
         self._inflight: dict[asyncio.Task, Job] = {}
         # Set whenever an in-flight job finishes, so the consume loop
@@ -72,10 +72,11 @@ class WorkerRunner:
 
         heartbeat = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
         reaper = asyncio.create_task(self._reaper_loop(), name="reaper")
+        scheduler = asyncio.create_task(self._scheduler_loop(), name="scheduler")
         try:
             await self._consume_loop()
         finally:
-            await self._shutdown(heartbeat, reaper)
+            await self._shutdown(heartbeat, reaper, scheduler)
 
     def request_shutdown(self) -> None:
         """Signal-handler entrypoint; safe to call multiple times."""
@@ -83,9 +84,7 @@ class WorkerRunner:
             logger.info("worker.shutdown_requested")
             self._draining.set()
 
-    async def _shutdown(
-        self, heartbeat: asyncio.Task, reaper: asyncio.Task
-    ) -> None:
+    async def _shutdown(self, *maintenance: asyncio.Task) -> None:
         # 1. Stop claiming; announce DRAINING so the fleet view shows it.
         await self.executor.set_worker_status(self.id, WorkerStatus.DRAINING)
         logger.info("worker.draining", inflight=len(self._inflight))
@@ -107,9 +106,9 @@ class WorkerRunner:
         if leftovers:
             await asyncio.gather(*leftovers, return_exceptions=True)
 
-        heartbeat.cancel()
-        reaper.cancel()
-        await asyncio.gather(heartbeat, reaper, return_exceptions=True)
+        for task in maintenance:
+            task.cancel()
+        await asyncio.gather(*maintenance, return_exceptions=True)
 
         await self.executor.set_worker_status(
             self.id, WorkerStatus.OFFLINE, stopped=True
@@ -133,6 +132,7 @@ class WorkerRunner:
                         queues=self.settings.worker_queue_list,
                         limit=free_slots,
                         lease_seconds=self.settings.lease_seconds,
+                        shard_key=self.settings.worker_shard,
                     )
                 except Exception:  # noqa: BLE001 — DB blip: back off, retry
                     logger.exception("worker.claim_failed")
@@ -245,3 +245,16 @@ class WorkerRunner:
                     await self.bus.publish_wake()
             except Exception:  # noqa: BLE001
                 logger.exception("worker.reaper_failed")
+
+    async def _scheduler_loop(self) -> None:
+        """Cron materializer, hosted like the reaper: every worker runs the
+        loop, the advisory lock inside makes one sweep win per tick."""
+        while True:
+            await asyncio.sleep(self.settings.scheduler_interval_seconds)
+            try:
+                created = await self.executor.materialize_schedules_once()
+                if created:
+                    # Materialized jobs are due now — wake the fleet.
+                    await self.bus.publish_wake()
+            except Exception:  # noqa: BLE001
+                logger.exception("worker.scheduler_failed")

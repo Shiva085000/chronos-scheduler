@@ -24,25 +24,54 @@ from sqlalchemy import delete, func, select, text
 from app.db.session import SessionFactory, engine
 from app.events import EventBus
 from app.core.config import settings
-from app.models import Job, JobStatus, User
+from app.models import Job, JobStatus, Organization, Project, Queue, User
 
 BENCH_EMAIL = "bench@example.com"
 
 
-async def ensure_user(session) -> uuid.UUID:
+async def ensure_user(session) -> tuple[uuid.UUID, uuid.UUID]:
+    """Returns (owner_id, default-queue id), creating the whole
+    org -> project -> queue chain on first run."""
     row = await session.execute(select(User).where(User.email == BENCH_EMAIL))
     user = row.scalar_one_or_none()
     if user is None:
-        user = User(email=BENCH_EMAIL, password_hash="not-a-login-user")
+        org = Organization(name=BENCH_EMAIL)
+        session.add(org)
+        await session.flush()
+        project = Project(org_id=org.id, name="default")
+        session.add(project)
+        await session.flush()
+        user = User(
+            email=BENCH_EMAIL, password_hash="not-a-login-user", org_id=org.id
+        )
         session.add(user)
         await session.commit()
-    return user.id
+    project = (
+        await session.execute(
+            select(Project)
+            .where(Project.org_id == user.org_id)
+            .order_by(Project.created_at.asc())
+            .limit(1)
+        )
+    ).scalar_one()
+    queue = (
+        await session.execute(
+            select(Queue).where(
+                Queue.project_id == project.id, Queue.name == "default"
+            )
+        )
+    ).scalar_one_or_none()
+    if queue is None:
+        queue = Queue(project_id=project.id, name="default")
+        session.add(queue)
+        await session.commit()
+    return user.id, queue.id
 
 
 async def run(n_jobs: int) -> None:
     bus = EventBus(settings.redis_url)
     async with SessionFactory() as session:
-        owner_id = await ensure_user(session)
+        owner_id, queue_id = await ensure_user(session)
 
         job_ids = [uuid.uuid4() for _ in range(n_jobs)]
         for chunk_start in range(0, n_jobs, 500):
@@ -51,6 +80,7 @@ async def run(n_jobs: int) -> None:
                 Job(
                     id=job_id,
                     owner_id=owner_id,
+                    queue_id=queue_id,
                     queue="default",
                     task_name="demo.echo",
                     payload={"bench": True},

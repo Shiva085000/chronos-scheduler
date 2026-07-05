@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     heartbeat_seconds: int = 10
     poll_interval_seconds: float = 2.0
     reaper_interval_seconds: float = 5.0
+    scheduler_interval_seconds: float = 5.0
     worker_offline_after_seconds: int = 60
     shutdown_grace_seconds: float = 20.0
 
@@ -62,6 +63,13 @@ class Settings(BaseSettings):
 
     # --- stats ----------------------------------------------------------
     stats_cache_ttl_seconds: int = 3
+
+    # --- AI summaries ---------------------------------------------------
+    gemini_api_key: str = ""
+
+    # --- sharding -------------------------------------------------------
+    # Pin a worker to a specific queue shard. None = consume all shards.
+    worker_shard: int | None = None
 
     @property
     def worker_queue_list(self) -> list[str]:

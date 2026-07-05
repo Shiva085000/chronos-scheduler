@@ -3,6 +3,8 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.models.user import UserRole
+
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -20,4 +22,5 @@ class UserRead(BaseModel):
 
     id: uuid.UUID
     email: str
+    role: UserRole
     created_at: dt.datetime

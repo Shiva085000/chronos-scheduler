@@ -15,7 +15,10 @@ from app.models import User
 from app.services.auth_service import AuthService
 from app.services.exceptions import NotFoundError
 from app.services.job_service import JobService
+from app.services.queue_service import QueueService
+from app.services.schedule_service import ScheduleService
 from app.services.stats_service import StatsService
+from app.services.tenancy_service import TenancyService
 from app.services.worker_service import WorkerService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -64,6 +67,21 @@ def get_worker_service(session: DbSession) -> WorkerService:
     return WorkerService(session)
 
 
+def get_queue_service(session: DbSession) -> QueueService:
+    return QueueService(session)
+
+
+def get_schedule_service(session: DbSession) -> ScheduleService:
+    return ScheduleService(session)
+
+
+def get_tenancy_service(session: DbSession) -> TenancyService:
+    return TenancyService(session)
+
+
 Jobs = Annotated[JobService, Depends(get_job_service)]
 Stats = Annotated[StatsService, Depends(get_stats_service)]
 Workers = Annotated[WorkerService, Depends(get_worker_service)]
+Queues = Annotated[QueueService, Depends(get_queue_service)]
+Schedules = Annotated[ScheduleService, Depends(get_schedule_service)]
+Tenancy = Annotated[TenancyService, Depends(get_tenancy_service)]

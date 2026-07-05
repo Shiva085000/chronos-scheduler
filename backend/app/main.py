@@ -8,21 +8,57 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import auth, dlq, health, jobs, metrics, stats, workers
+from app.api.routers import (
+    auth,
+    dlq,
+    health,
+    jobs,
+    metrics,
+    projects,
+    queues,
+    schedules,
+    stats,
+    users,
+    workers,
+)
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.db.session import engine
 from app.events import EventBus
+from app.services.exceptions import ForbiddenError
 
 logger = structlog.get_logger(__name__)
 
 TAGS_METADATA = [
     {"name": "auth", "description": "Registration and JWT login."},
     {
+        "name": "projects",
+        "description": (
+            "Organizations and projects. Every user gets a personal "
+            "organization with a default project at registration; projects "
+            "own queues."
+        ),
+    },
+    {
+        "name": "queues",
+        "description": (
+            "Queue configuration: pause/resume, fleet-wide concurrency "
+            "caps, default retry policy, and per-queue statistics."
+        ),
+    },
+    {
         "name": "jobs",
         "description": (
-            "Enqueue and manage jobs. Jobs are executed at-least-once by "
-            "the worker fleet with per-job retry policies."
+            "Enqueue and manage jobs — immediate, delayed (run_at), or "
+            "batch. Jobs are executed at-least-once by the worker fleet "
+            "with per-job retry policies."
+        ),
+    },
+    {
+        "name": "schedules",
+        "description": (
+            "Recurring (cron) schedules that materialize jobs on a UTC "
+            "cron expression."
         ),
     },
     {
@@ -93,10 +129,24 @@ def create_app() -> FastAPI:
     app.include_router(metrics.router)
     api = "/api/v1"
     app.include_router(auth.router, prefix=api)
+    app.include_router(projects.router, prefix=api)
+    app.include_router(queues.router, prefix=api)
     app.include_router(jobs.router, prefix=api)
+    app.include_router(schedules.router, prefix=api)
     app.include_router(dlq.router, prefix=api)
     app.include_router(workers.router, prefix=api)
     app.include_router(stats.router, prefix=api)
+    app.include_router(users.router, prefix=api)
+
+    # RBAC: map ForbiddenError to 403
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(ForbiddenError)
+    async def forbidden_handler(request, exc: ForbiddenError):
+        return JSONResponse(
+            status_code=403, content={"detail": exc.detail}
+        )
+
     return app
 
 
