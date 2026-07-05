@@ -52,7 +52,7 @@ SCREENSHOTS = [
     ("01-dashboard.png", "Dashboard — cluster stats, throughput (succeeded/failed per minute), status distribution; polls live."),
     ("02-queues.png", "Queues — per-queue counts, pause/resume, shard badges, concurrency caps, default retry policy, config dialog."),
     ("03-jobs.png", "Job explorer — status/queue filters, pagination, priorities, attempts."),
-    ("04-job-detail.png", "Job detail — a DLQ'd job: payload, full traceback, retry/backoff policy, per-attempt execution history with worker assignment and durations, one-click requeue."),
+    ("04-job-detail.png", "Job detail — a DLQ'd job on the hosted deployment: payload, full traceback, per-attempt execution history with worker assignment, one-click requeue, and the AI Failure Analysis note produced live by the multi-agent LangGraph pipeline (triage classified it [permanent], diagnosed the invalid signature, recommended the fix)."),
     ("05-schedules.png", "Recurring schedules — cron expression, next/last run cursors, pause/resume, create dialog with presets."),
     ("06-dlq.png", "Dead Letter Queue — jobs that exhausted their retry budget; inspect and requeue with a fresh budget."),
     ("07-workers.png", "Worker fleet — liveness via heartbeats; a worker silent for 60s is declared offline and its leases reclaimed."),
