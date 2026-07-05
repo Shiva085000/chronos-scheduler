@@ -16,19 +16,16 @@ run-locally instructions only) and rebuild — takes seconds.
 
 import base64
 import json
-import re
 import urllib.request
 from pathlib import Path
-
-import markdown
 
 # ---------------------------------------------------------------------------
 # Submission metadata — edit these, then rebuild.
 AUTHOR = "Gokul Shiva"
 EMAIL = "gokulshiva085@gmail.com"
-REPO_URL = ""          # e.g. https://github.com/<user>/chronos-scheduler
-FRONTEND_URL = ""      # hosted dashboard, if deployed
-BACKEND_URL = ""       # hosted API (Swagger at <url>/docs), if deployed
+REPO_URL = "https://github.com/Shiva085000/chronos-scheduler"
+FRONTEND_URL = "https://frontend-production-e4f9.up.railway.app"
+BACKEND_URL = "https://api-production-f587.up.railway.app"
 # The running local stack the API reference is generated from:
 LOCAL_API = "http://localhost:8010"
 # ---------------------------------------------------------------------------
@@ -93,22 +90,32 @@ channel) and dashboard load.
   locking (advisory locks), event-driven execution (wake channel), and
   login rate limiting.
 
-## How to run
+## Live demo & source
+
+| What | Where |
+|---|---|
+| **Live dashboard** | {FRONTEND_URL} — click **Demo Login** (`demo@example.com` / `demo12345`) |
+| **Live API (Swagger)** | {BACKEND_URL}/docs |
+| **Source code** | {REPO_URL} |
+| Read-only RBAC user | `viewer@example.com` / `viewer12345` — mutating actions return 403 |
+| Prometheus metrics | {BACKEND_URL}/metrics |
+
+The hosted stack runs on Railway: managed Postgres + Redis, the API, and a
+worker service (private networking between them; the workers claim from
+all demo queues). The dedicated-shard worker topology is exercised in the
+local compose stack and the automated tests.
+
+## Running locally
 
 ```bash
-git clone <repository>   # or unzip the source archive
-cd chronos
+git clone {REPO_URL}
+cd chronos-scheduler
 docker compose up --build -d      # postgres, redis, api, 2 workers, 1 sharded worker, frontend
 docker compose exec api python -m app.scripts.seed   # demo data
 ```
 
-| What | Where |
-|---|---|
-| Dashboard | http://localhost:3000 — click **Demo Login** (`demo@example.com` / `demo12345`) |
-| Read-only RBAC user | `viewer@example.com` / `viewer12345` — mutating actions return 403 |
-| OpenAPI / Swagger | http://localhost:8000/docs |
-| Prometheus metrics | http://localhost:8000/metrics |
-| Full test suite | `make test` (39 tests, unit + DB integration) |
+Dashboard at http://localhost:3000, Swagger at http://localhost:8000/docs.
+Full test suite: `make test` (39 tests, unit + DB integration).
 
 Within ~2 minutes of seeding, the dashboard shows: an instant success, a
 job holding a lease, the retry pipeline succeeding on attempt 3, a DLQ

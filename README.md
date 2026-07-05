@@ -24,6 +24,16 @@ diagrams of the core protocols, including the ER diagram (§11). Everything
 combined, print-ready: [docs/Chronos-Report.pdf](docs/Chronos-Report.pdf)
 (design doc + measured benchmarks + rendered diagrams, 23pp).
 
+## Live demo
+
+| What | Where |
+|---|---|
+| Dashboard | https://frontend-production-e4f9.up.railway.app — click **Demo Login** |
+| API (Swagger) | https://api-production-f587.up.railway.app/docs |
+
+Hosted on Railway (managed Postgres + Redis + API + worker). The full
+topology — two workers plus the dedicated shard worker — runs locally:
+
 ## Quickstart
 
 ```bash
